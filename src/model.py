@@ -463,6 +463,109 @@ def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75
     if save_path:
         plt.savefig(save_path)
     plt.close(fig)
+    
+    
+class SingleViewMAE(nn.Module):
+    def __init__(self, img_size=224, patch_size=8, embed_dim=512, num_heads=4, enc_depth=6, dec_depth=6):
+        super().__init__()
+        self.patch_size = patch_size
+        self.num_patches = (img_size // patch_size) ** 2
+        
+        # ==========================================
+        # STRUCTURAL MATCHING: Exact same layers as CroCo Stage 2
+        # ==========================================
+        hidden_dim = embed_dim // 2
+        self.patch_embed = nn.Sequential(
+            nn.Conv2d(3, hidden_dim, kernel_size=4, stride=4),
+            nn.LayerNorm([hidden_dim, img_size // 4, img_size // 4]), 
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, embed_dim, kernel_size=2, stride=2)
+        )
+        self.patch_norm = nn.LayerNorm(embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
+        torch.nn.init.trunc_normal_(self.pos_embed, std=.02)
+        
+        # Shared Encoder (Pre-LN for training stability)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, batch_first=True, norm_first=True  
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=enc_depth)
+        
+        # ==========================================
+        # STAGE 1 SPECIFIC DECODER (Pure Self-Attention)
+        # ==========================================
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        torch.nn.init.trunc_normal_(self.mask_token, std=.02)
+        
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, batch_first=True, norm_first=True
+        )
+        self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=dec_depth)
+        self.reconstruction_head = nn.Linear(embed_dim, 3 * patch_size * patch_size)
+
+    def forward(self, img, mask_ratio=0.75):
+        B = img.size(0)
+        
+        # Extract and normalize patches
+        tokens = self.patch_embed(img).flatten(2).transpose(1, 2)
+        tokens = self.patch_norm(tokens)
+        
+        # Apply spatial mapping
+        tokens = tokens + self.pos_embed
+        
+        # Masking sequence
+        num_masked = int(mask_ratio * self.num_patches)
+        noise = torch.rand(B, self.num_patches, device=img.device)
+        mask_indices = torch.argsort(noise, dim=1)[:, :num_masked]
+        visible_indices = torch.argsort(noise, dim=1)[:, num_masked:]
+        
+        batch_indices = torch.arange(B).unsqueeze(1).expand(-1, self.num_patches - num_masked)
+        visible_tokens = tokens[batch_indices, visible_indices]
+        
+        # Encode unmasked patches
+        encoded_tokens = self.encoder(visible_tokens)
+        
+        # Reassemble the sequence for the decoder
+        full_tokens = self.mask_token.expand(B, self.num_patches, -1).clone()
+        full_tokens[batch_indices, visible_indices] = encoded_tokens
+        
+        # Reinject coordinates strictly once before reconstruction
+        full_tokens = full_tokens + self.pos_embed
+        
+        # Decode and process reconstruction
+        decoded_tokens = self.decoder(full_tokens)
+        preds = self.reconstruction_head(decoded_tokens)
+        
+        return preds, mask_indices
+    
+def compute_stage1_loss(model, img, mask_ratio=0.75):
+    """
+    Computes standard L1 loss strictly on the masked patches 
+    for Stage 1 Single-View MAE Pre-training.
+    """
+    B = img.size(0)
+    
+    # 1. Single-image forward pass
+    # preds: [B, num_patches, 3 * patch_size * patch_size]
+    preds, mask_indices = model(img, mask_ratio=mask_ratio)
+    
+    # 2. Patchify the ground truth target image
+    target_patches = patchify(img, patch_size=model.patch_size)
+    
+    # 3. Gather strictly the patches that were masked out
+    batch_indices = torch.arange(B, device=img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
+    masked_targets = target_patches[batch_indices, mask_indices]
+    
+    # Handle robust alignment in case your decoder outputs full or sliced sequences
+    if preds.size(1) == target_patches.size(1):
+        masked_preds = preds[batch_indices, mask_indices]
+    else:
+        masked_preds = preds
+        
+    # 4. Compute standard baseline L1 Loss
+    loss = torch.abs(masked_preds - masked_targets).mean()
+    
+    return loss
 
 # def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
 #     """

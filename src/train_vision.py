@@ -13,7 +13,6 @@ from pathlib import Path
 import torchvision.transforms as T
 from PIL import Image
 
-
 class CroCoPairDataset(Dataset):
     """
     Loads (topdown_masked, topdown_full) pairs for CroCo-style pretraining.
