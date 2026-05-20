@@ -254,23 +254,29 @@ class CroCoAutoencoder(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
         
         # ==========================================
-        # 1. PATCH EMBEDDING
+        # 1. NON-LINEAR PATCH EMBEDDING STEM
         # ==========================================
-        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=patch_size, stride=patch_size)
+        # Hierarchical extraction prevents blocks from blurring into the background
+        hidden_dim = embed_dim // 2
         
-        # CRITICAL STABILITY FIX: Normalize features after upscaling (192 -> 512)
+        self.patch_embed = nn.Sequential(
+            nn.Conv2d(3, hidden_dim, kernel_size=4, stride=4),
+            nn.LayerNorm([hidden_dim, img_size // 4, img_size // 4]), 
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, embed_dim, kernel_size=2, stride=2)
+        )
+        
         self.patch_norm = nn.LayerNorm(embed_dim)
         
-        # Inside CroCoAutoencoder.__init__
-
-        # Separate spatial grids for each camera perspective
+        # ==========================================
+        # 2. SEPARATE SPATIAL & VIEW GRIDS
+        # ==========================================
         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
         self.grip_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
         torch.nn.init.trunc_normal_(self.pos_embed, std=.02)
         torch.nn.init.trunc_normal_(self.grip_pos_embed, std=.02)
 
-        # Global View Namespace Embeddings (Tells tokens which camera they belong to)
         self.topdown_view_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.gripper_view_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
@@ -278,51 +284,34 @@ class CroCoAutoencoder(nn.Module):
         torch.nn.init.trunc_normal_(self.gripper_view_embed, std=.02)
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        # CRITICAL STABILITY FIX: Initialize mask token
         torch.nn.init.trunc_normal_(self.mask_token, std=.02)
         
         # ==========================================
-        # 2. SHARED ENCODER (ViT)
+        # 3. TRANSFORMER BLOCKS (Pre-LN)
         # ==========================================
-        # CRITICAL STABILITY FIX: norm_first=True enforces Pre-LN architecture
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, 
-            nhead=num_heads, 
-            batch_first=True,
-            norm_first=True  
+            d_model=embed_dim, nhead=num_heads, batch_first=True, norm_first=True  
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=enc_depth)
         
-        # ==========================================
-        # 3. CROCO DECODER (Self-Attn + Cross-Attn)
-        # ==========================================
-        # CRITICAL STABILITY FIX: norm_first=True enforces Pre-LN architecture
         decoder_layer = nn.TransformerDecoderLayer(
-            d_model=embed_dim, 
-            nhead=num_heads, 
-            batch_first=True,
-            norm_first=True  
+            d_model=embed_dim, nhead=num_heads, batch_first=True, norm_first=True  
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=dec_depth)
         
-        # ==========================================
-        # 4. RECONSTRUCTION HEAD
-        # ==========================================
         self.reconstruction_head = nn.Linear(embed_dim, 3 * patch_size * patch_size)
 
     def forward(self, topdown_img, gripper_img, mask_ratio=0.75, return_embedding_only=False):
         B = topdown_img.size(0)
         
         # --- 1. RAW FEATURE EXTRACTION ---
-        # Flatten and normalize base texture representations
         top_tokens = self.patch_embed(topdown_img).flatten(2).transpose(1, 2)
         grip_tokens = self.patch_embed(gripper_img).flatten(2).transpose(1, 2)
 
         top_tokens = self.patch_norm(top_tokens)
         grip_tokens = self.patch_norm(grip_tokens)
 
-        # --- 2. ENCODER STREAM PREP ---
-        # Apply spatial coordinates and view tags for the Encoder pass
+        # --- 2. ENCODER PREP ---
         enc_top_tokens = top_tokens + self.pos_embed + self.topdown_view_embed
         enc_grip_tokens = grip_tokens + self.grip_pos_embed + self.gripper_view_embed
         
@@ -332,7 +321,6 @@ class CroCoAutoencoder(nn.Module):
         mask_indices = torch.argsort(noise, dim=1)[:, :num_masked]
         visible_indices = torch.argsort(noise, dim=1)[:, num_masked:]
         
-        # Gather strictly visible tokens for the encoder
         batch_indices = torch.arange(B).unsqueeze(1).expand(-1, self.num_patches - num_masked)
         visible_top_tokens = enc_top_tokens[batch_indices, visible_indices]
         
@@ -340,19 +328,14 @@ class CroCoAutoencoder(nn.Module):
         enc_top = self.encoder(visible_top_tokens)
         enc_grip = self.encoder(enc_grip_tokens)
         
-        # --- 5. DECODER SEQUENCE ASSEMBLY ---
-        # Initialize full sequence using the learnable mask token as the baseline feature
+        # --- 5. DECODER PREP (Clean Assembly) ---
         full_top_tokens = self.mask_token.expand(B, self.num_patches, -1).clone()
-        
-        # Overwrite visible slots with processed encoder outputs
         full_top_tokens[batch_indices, visible_indices] = enc_top
         
-        # CRITICAL CORRECTION: Add spatial coordinates and view tags strictly ONCE 
-        # to the newly assembled decoder sequence to calibrate the mask tokens.
+        # Add spatial coordinates and view tags strictly ONCE to the complete sequence
         full_top_tokens = full_top_tokens + self.pos_embed + self.topdown_view_embed
         
         # --- 6. CROSS-VIEW COMPLETION ---
-        # Queries: full_top_tokens | Keys/Values: enc_grip
         fused_embeddings = self.decoder(tgt=full_top_tokens, memory=enc_grip)
         
         if return_embedding_only:
@@ -362,88 +345,104 @@ class CroCoAutoencoder(nn.Module):
         reconstructed_patches = self.reconstruction_head(fused_embeddings)
         
         return reconstructed_patches, mask_indices
-    
+
 def patchify(imgs, patch_size=16):
-    """
-    Converts a batch of images [B, 3, H, W] into a sequence of flattened patches.
-    Output shape: [B, num_patches, 3 * patch_size * patch_size]
-    """
     p = patch_size
     assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
-    
     h = w = imgs.shape[2] // p
     x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
-    x = torch.einsum('nchpwq->nhwpqc', x) # Rearrange dimensions
-    x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3)) # Flatten the patch
+    x = torch.einsum('nchpwq->nhwpqc', x) 
+    x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3)) 
     return x
 
 def unpatchify(x, patch_size=16):
-    """
-    Reverses the patchify operation.
-    Converts a sequence of patches [B, num_patches, 3 * p * p] 
-    back into an image [B, 3, H, W].
-    """
     B = x.shape[0]
     p = patch_size
     h = w = int(x.shape[1] ** 0.5)
-    
-    # Reverse the flattening
     x = x.reshape(shape=(B, h, w, p, p, 3))
-    # Reverse the dimension rearrangement
     x = torch.einsum('nhwpqc->nchpwq', x)
-    # Reverse the grid splitting
     x = x.reshape(shape=(B, 3, h * p, w * p))
     return x
 
+def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
+    """
+    Color-Heuristic Boosted L1 Loss. 
+    Massively penalizes the network for failing to reconstruct multi-channel neon blocks.
+    """
+    B = topdown_img.size(0)
+    
+    # 1. Forward Pass
+    preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
+    target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=model.patch_size)
+    batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
+    
+    masked_targets = target_patches[batch_indices, mask_indices]
+    
+    if preds.size(1) == target_patches.size(1):
+        masked_preds = preds[batch_indices, mask_indices] 
+    else:
+        masked_preds = preds 
+        
+    # 2. Base L1 Error
+    raw_patch_loss = torch.abs(masked_preds - masked_targets).mean(dim=-1) # [B, num_masked]
+    
+    # ==========================================
+    # 3. COLOR-HEURISTIC BOOST 
+    # ==========================================
+    patch_size = model.patch_size
+    rgb_targets = masked_targets.view(B, -1, 3, patch_size, patch_size)
+    
+    # Detect high-variance color channels (neon blocks vs solid bins)
+    channel_variance = rgb_targets.var(dim=2).mean(dim=(2, 3)) 
+    
+    # Multiplier scales up the loss for block regions (detached to keep gradients clean)
+    color_weight = (1.0 + (channel_variance * 10.0)).detach()
+    
+    # Apply the boost. No OHEM sorting here so the model learns macro-geometry at Epoch 0!
+    boosted_loss = raw_patch_loss * color_weight
+    
+    return boosted_loss.mean()
+
 def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75, num_samples=3, save_path=None):
-    """
-    Runs a forward pass and plots:
-    [Gripper] | [Masked Input] | [Reconstruction] | [Ground Truth]
-    """
     model.eval()
     B = topdown_img.size(0)
-    num_samples = min(B, num_samples) # Don't try to plot more images than are in the batch
+    num_samples = min(B, num_samples) 
     
     with torch.no_grad():
         preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
         
-    # 1. Break the ground truth into patches
     target_patches = patchify(topdown_img, patch_size=model.patch_size)
-    
-    # 2. Create the "Masked Input" (what the model actually saw)
-    # We copy the target patches and zero-out the masked ones
     masked_input_patches = target_patches.clone()
     batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
     masked_input_patches[batch_indices, mask_indices] = 0.0 
     
-    # 3. Create the "Reconstructed Output"
-    # Standard practice: Keep the visible ground truth patches, but overlay the model's predictions for the masked patches
     reconstructed_patches = target_patches.clone()
-    reconstructed_patches[batch_indices, mask_indices] = preds[batch_indices, mask_indices]
     
-    # 4. Stitch everything back into 2D images
+    # Fix alignment for visualizer just like in the loss function
+    if preds.size(1) == target_patches.size(1):
+        reconstructed_patches[batch_indices, mask_indices] = preds[batch_indices, mask_indices]
+    else:
+        reconstructed_patches[batch_indices, mask_indices] = preds
+    
     masked_input_img = unpatchify(masked_input_patches, patch_size=model.patch_size)
     reconstructed_img = unpatchify(reconstructed_patches, patch_size=model.patch_size)
     
-    # 5. Un-normalize everything so Matplotlib can render the colors correctly
     mean = torch.tensor([0.485, 0.456, 0.406], device=topdown_img.device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=topdown_img.device).view(1, 3, 1, 1)
     
     def unnorm(img):
         img = img * std + mean
-        return torch.clamp(img, 0, 1).cpu().numpy() # Clamp to [0, 1] range
+        return torch.clamp(img, 0, 1).cpu().numpy() 
         
     topdown_vis = unnorm(topdown_img)
     gripper_vis = unnorm(gripper_img)
     masked_vis = unnorm(masked_input_img)
     recon_vis = unnorm(reconstructed_img)
     
-    # 6. Plot the grid
     fig, axes = plt.subplots(num_samples, 4, figsize=(14, 3.5 * num_samples))
-    if num_samples == 1: axes = [axes] # Handle 1D array case if batch size is 1
+    if num_samples == 1: axes = [axes] 
         
     for i in range(num_samples):
-        # Matplotlib expects channels last: (H, W, C)
         axes[i][0].imshow(np.transpose(gripper_vis[i], (1, 2, 0)))
         axes[i][0].set_title("Gripper Context" if i==0 else "")
         axes[i][0].axis('off')
@@ -461,9 +460,9 @@ def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75
         axes[i][3].axis('off')
         
     plt.tight_layout()
-    plt.savefig(save_path)
+    if save_path:
+        plt.savefig(save_path)
     plt.close(fig)
-
 
 # def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
 #     """
@@ -494,39 +493,39 @@ def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75
 #     return loss
 
 
-def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
-    """
-    Computes the variance-weighted L1 loss strictly on the masked patches.
-    Automatically adapts whether the decoder outputs full or masked sequences.
-    """
-    B = topdown_img.size(0)
+# def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
+#     """
+#     Computes the variance-weighted L1 loss strictly on the masked patches.
+#     Automatically adapts whether the decoder outputs full or masked sequences.
+#     """
+#     B = topdown_img.size(0)
     
-    # 1. Forward pass
-    # For patch_size=8, preds might be [B, 784, 192] or [B, 588, 192]
-    preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
+#     # 1. Forward pass
+#     # For patch_size=8, preds might be [B, 784, 192] or [B, 588, 192]
+#     preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
     
-    # 2. Patchify the ground truth target -> [B, 784, 192]
-    target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=model.patch_size)
+#     # 2. Patchify the ground truth target -> [B, 784, 192]
+#     target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=model.patch_size)
     
-    # 3. Calculate patch variance to compute object-focused weights
-    patch_variance = target_patches.var(dim=-1, keepdim=True) # [B, 784, 1]
-    weight = 1.0 + (patch_variance * 10.0) # Scale up penalty for high-variance patches
+#     # 3. Calculate patch variance to compute object-focused weights
+#     patch_variance = target_patches.var(dim=-1, keepdim=True) # [B, 784, 1]
+#     weight = 1.0 + (patch_variance * 10.0) # Scale up penalty for high-variance patches
     
-    # 4. Create batch indices for slicing
-    batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
+#     # 4. Create batch indices for slicing
+#     batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
     
-    # 5. Extract strictly the masked targets and weights -> [B, 588, ...]
-    masked_targets = target_patches[batch_indices, mask_indices]
-    masked_weights = weight[batch_indices, mask_indices]
+#     # 5. Extract strictly the masked targets and weights -> [B, 588, ...]
+#     masked_targets = target_patches[batch_indices, mask_indices]
+#     masked_weights = weight[batch_indices, mask_indices]
     
-    # 6. ROBUST ALIGNMENT: Slice preds if it returned the full sequence
-    if preds.size(1) == target_patches.size(1):
-        masked_preds = preds[batch_indices, mask_indices] # Slices 784 down to 588
-    else:
-        masked_preds = preds # Already 588
+#     # 6. ROBUST ALIGNMENT: Slice preds if it returned the full sequence
+#     if preds.size(1) == target_patches.size(1):
+#         masked_preds = preds[batch_indices, mask_indices] # Slices 784 down to 588
+#     else:
+#         masked_preds = preds # Already 588
         
-    # 7. Compute weighted L1 loss
-    raw_loss = torch.abs(masked_preds - masked_targets)
-    weighted_loss = (raw_loss * masked_weights).mean()
+#     # 7. Compute weighted L1 loss
+#     raw_loss = torch.abs(masked_preds - masked_targets)
+#     weighted_loss = (raw_loss * masked_weights).mean()
     
-    return weighted_loss
+#     return weighted_loss
