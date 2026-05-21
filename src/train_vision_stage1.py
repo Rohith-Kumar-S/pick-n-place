@@ -195,7 +195,7 @@ def main():
             optimizer.zero_grad()
 
             # Execute single view loss sequence at 75% standard masking ratio
-            loss = compute_stage1_loss(model, img_batch, mask_ratio=0.75)
+            loss = compute_stage1_loss(model, img_batch, mask_ratio=0.4)
             loss.backward()
 
             # Enforce hard-stop value clipping to ground multimodal dynamics safely
@@ -214,7 +214,7 @@ def main():
             test_loss = []
             for img_batch in tqdm(test_loader, total=len(test_loader), desc="Stage 1 Testing"):
                 img_batch = img_batch.to(device)
-                loss = compute_stage1_loss(model, img_batch, mask_ratio=0.75)
+                loss = compute_stage1_loss(model, img_batch, mask_ratio=0.4)
                 test_loss.append(loss.item())
                 
         test_loss = np.array(test_loss).mean()
@@ -241,7 +241,7 @@ def main():
             
             print("Dumping Visual Validation Reconstructions...")
             visualize_stage1_predictions(
-                model, img_batch, mask_ratio=0.75, num_samples=3, 
+                model, img_batch, mask_ratio=0.4, num_samples=3, 
                 save_path=os.path.join(results_dir, f"stage1_epoch_{epoch}.png")
             )
 
