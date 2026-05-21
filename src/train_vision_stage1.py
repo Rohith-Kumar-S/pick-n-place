@@ -43,7 +43,8 @@ class SingleViewCurriculumDataset(Dataset):
                 npz_files = npz_files[int(0.8 * total_npz_files):]
                 
             # Target optimization: adjust debugging ceiling if needed
-            npz_files = npz_files[:200]
+            print("Istrain: ", self.is_train, " ",len(npz_files))
+            # npz_files = npz_files[:200]
 
             print(f"[{split_name.upper()}] Unpacking {len(npz_files)} NPZ files into a unified single-view pool...")
             
@@ -167,8 +168,8 @@ def main():
     )
 
     # Initialize the flattened single-view datasets
-    train_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data/raw/expt_4/", is_train=True)
-    test_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data/raw/expt_4/", is_train=False)
+    train_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=True)
+    test_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=False)
 
     num_workers = 2 if torch.cuda.is_available() else 0
     pin_memory = True if torch.cuda.is_available() else False
