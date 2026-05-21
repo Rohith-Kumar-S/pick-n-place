@@ -16,34 +16,48 @@ import matplotlib.pyplot as plt
 class SingleViewCurriculumDataset(Dataset):
     """
     Pools both Top-Down and Gripper POV images into a single randomized list
-    for single-view MAE pre-training.
+    for single-view MAE pre-training. Includes disk caching for fast initialization.
     """
     def __init__(self, data_root: str, img_size: int = 224, is_train: bool = True):
         self.img_size = img_size
         self.is_train = is_train
+        
+        split_name = "train" if is_train else "test"
+        cache_path = os.path.join(data_root, f"stage1_dataset_cache_{split_name}.pt")
 
-        # Build individual flat image samples: (npz_path, frame_idx, view_key)
-        self.samples: list[tuple[Path, int, str]] = []
-        
-        npz_files = sorted(Path(data_root).glob("ep_*.npz"))
-        total_npz_files = len(npz_files)
-        
-        if self.is_train:
-            npz_files = npz_files[:int(0.8 * total_npz_files)]
-            npz_files = np.random.permutation(npz_files)  # Shuffle episode files
+        # 1. Check if the cache already exists
+        if os.path.exists(cache_path):
+            print(f"[{split_name.upper()}] Loading cached dataset from {cache_path}...")
+            self.samples = torch.load(cache_path)
         else:
-            npz_files = npz_files[int(0.8 * total_npz_files):]
+            # 2. Build the dataset if no cache is found
+            self.samples: list[tuple[Path, int, str]] = []
             
-        # Target optimization: adjust debugging ceiling if needed
-        npz_files = npz_files[:200]
+            npz_files = sorted(Path(data_root).glob("ep_*.npz"))
+            total_npz_files = len(npz_files)
+            
+            if self.is_train:
+                npz_files = npz_files[:int(0.8 * total_npz_files)]
+                npz_files = np.random.permutation(npz_files)  # Shuffle episode files
+            else:
+                npz_files = npz_files[int(0.8 * total_npz_files):]
+                
+            # Target optimization: adjust debugging ceiling if needed
+            npz_files = npz_files[:200]
 
-        print(f"Unpacking {len(npz_files)} NPZ files into a unified single-view pool...")
-        for npz in npz_files:
-            n = np.load(npz, allow_pickle=True)['topdown'].shape[0]
-            for i in range(n):
-                # Add BOTH views as separate, independent standalone datapoints
-                self.samples.append((npz, i, 'topdown'))
-                self.samples.append((npz, i, 'gripperpov'))
+            print(f"[{split_name.upper()}] Unpacking {len(npz_files)} NPZ files into a unified single-view pool...")
+            
+            # Added tqdm here so you don't stare at a blank screen during initial creation
+            for npz in tqdm(npz_files, desc=f"Building {split_name} pool"):
+                n = np.load(npz, allow_pickle=True)['topdown'].shape[0]
+                for i in range(n):
+                    # Add BOTH views as separate, independent standalone datapoints
+                    self.samples.append((npz, i, 'topdown'))
+                    self.samples.append((npz, i, 'gripperpov'))
+                    
+            # Save the parsed list to disk for the next run
+            print(f"[{split_name.upper()}] Saving dataset cache to {cache_path}...")
+            torch.save(self.samples, cache_path)
 
         self.transform = T.Compose([
             T.ToTensor(),
@@ -61,7 +75,6 @@ class SingleViewCurriculumDataset(Dataset):
         img = Image.fromarray(np.transpose(raw_arr, (1, 2, 0)))
         
         return self.transform(img)
-
 
 def visualize_stage1_predictions(model, img_tensor, mask_ratio=0.75, num_samples=3, save_path=None):
     """
