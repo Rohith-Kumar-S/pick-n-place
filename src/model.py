@@ -540,32 +540,42 @@ class SingleViewMAE(nn.Module):
     
 def compute_stage1_loss(model, img, mask_ratio=0.75):
     """
-    Computes standard L1 loss strictly on the masked patches 
-    for Stage 1 Single-View MAE Pre-training.
+    Color-Boosted Stage 1 Loss.
+    Forces the Single-View MAE to prioritize the blocks immediately.
     """
     B = img.size(0)
     
     # 1. Single-image forward pass
-    # preds: [B, num_patches, 3 * patch_size * patch_size]
     preds, mask_indices = model(img, mask_ratio=mask_ratio)
-    
-    # 2. Patchify the ground truth target image
     target_patches = patchify(img, patch_size=model.patch_size)
     
-    # 3. Gather strictly the patches that were masked out
     batch_indices = torch.arange(B, device=img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
     masked_targets = target_patches[batch_indices, mask_indices]
     
-    # Handle robust alignment in case your decoder outputs full or sliced sequences
     if preds.size(1) == target_patches.size(1):
         masked_preds = preds[batch_indices, mask_indices]
     else:
         masked_preds = preds
         
-    # 4. Compute standard baseline L1 Loss
-    loss = torch.abs(masked_preds - masked_targets).mean()
+    # 2. Base L1 Error per patch
+    raw_patch_loss = torch.abs(masked_preds - masked_targets).mean(dim=-1) # [B, num_masked]
     
-    return loss
+    # ==========================================
+    # 3. COLOR-HEURISTIC BOOST 
+    # ==========================================
+    patch_size = model.patch_size
+    rgb_targets = masked_targets.view(B, -1, 3, patch_size, patch_size)
+    
+    # Detect high-variance color channels (neon blocks vs solid bins)
+    channel_variance = rgb_targets.var(dim=2).mean(dim=(2, 3)) 
+    
+    # 10x multiplier scales up the loss specifically for the block regions
+    color_weight = (1.0 + (channel_variance * 10.0)).detach()
+    
+    # Apply the boost
+    boosted_loss = raw_patch_loss * color_weight
+    
+    return boosted_loss.mean()
 
 # def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
 #     """
