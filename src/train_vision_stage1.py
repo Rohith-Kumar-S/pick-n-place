@@ -28,7 +28,7 @@ class SingleViewCurriculumDataset(Dataset):
         # 1. Check if the cache already exists
         if os.path.exists(cache_path):
             print(f"[{split_name.upper()}] Loading cached dataset from {cache_path}...")
-            self.samples = torch.load(cache_path)
+            self.samples = torch.load(cache_path, weights_only=False)
         else:
             # 2. Build the dataset if no cache is found
             self.samples: list[tuple[Path, int, str]] = []
