@@ -139,6 +139,7 @@ def parse_args():
     parser = argparse.ArgumentParser("Stage 1 Single-View Curriculum MAE Pretraining")
     parser.add_argument("--expt", type=str, default="expt_4_stage1", help="expt name")
     parser.add_argument("--seed", type=int, default=0, help="seed")
+    parser.add_argument("--ckpt", type=int, default="", help="checkpoint epoch")
     parser.add_argument("--batch-size", type=int, default=64, help="batch size")
     parser.add_argument("--epochs", type=int, default=150, help="Stage 1 training total epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Starting learning rate")
@@ -158,15 +159,22 @@ def main():
     results_dir = os.path.join("/content/drive/MyDrive/APLDL/results/", arglist.expt)
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
-
+    
     # Initialize the SingleView Curriculum Model
     model = SingleViewMAE(patch_size=8, embed_dim=512, num_heads=4, enc_depth=6, dec_depth=6).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=arglist.lr, weight_decay=0.05)
-    
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5
     )
-
+    start_epoch = 0
+    if arglist.ckpt != "":
+        checkpoint_path = os.path.join(model_dir, arglist.ckpt)
+        print(f"Loading model from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resuming from epoch {start_epoch}")
     # Initialize the flattened single-view datasets
     train_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=True)
     test_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=False)
@@ -182,7 +190,7 @@ def main():
 
     best_test_loss = np.inf
     
-    for epoch in range(arglist.epochs):
+    for epoch in range(start_epoch, arglist.epochs):
         print(f"Epoch {epoch + 1} / {arglist.epochs}")
         
         # ==========================================
