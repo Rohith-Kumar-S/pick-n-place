@@ -139,7 +139,7 @@ def parse_args():
     parser = argparse.ArgumentParser("Stage 1 Single-View Curriculum MAE Pretraining")
     parser.add_argument("--expt", type=str, default="expt_4_stage1", help="expt name")
     parser.add_argument("--seed", type=int, default=0, help="seed")
-    parser.add_argument("--ckpt", type=int, default="", help="checkpoint epoch")
+    parser.add_argument("--ckpt", type=str, default="", help="checkpoint epoch")
     parser.add_argument("--batch-size", type=int, default=64, help="batch size")
     parser.add_argument("--epochs", type=int, default=150, help="Stage 1 training total epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Starting learning rate")
