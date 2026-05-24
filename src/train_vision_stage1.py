@@ -72,10 +72,19 @@ class SingleViewCurriculumDataset(Dataset):
         npz_path, frame_idx, view_key = self.samples[idx]
         ep = np.load(npz_path, allow_pickle=True)
         
+        # 1. Load and transform the image
         raw_arr = ep[view_key][frame_idx]
         img = Image.fromarray(np.transpose(raw_arr, (1, 2, 0)))
+        img_tensor = self.transform(img)
         
-        return self.transform(img)
+        # 2. Match the bounding box to the current view
+        bbox_key = 'bboxes_top' if view_key == 'topdown' else 'bboxes_gripper'
+        bboxes = ep[bbox_key][frame_idx]
+        
+        # 3. Convert to float32 tensor for deep learning loss calculations
+        bboxes_tensor = torch.tensor(bboxes, dtype=torch.float32)
+        
+        return img_tensor, bboxes_tensor
 
 def visualize_stage1_predictions(model, img_tensor, mask_ratio=0.75, num_samples=3, save_path=None):
     """
