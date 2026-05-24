@@ -185,8 +185,8 @@ def main():
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resuming from epoch {start_epoch}")
     # Initialize the flattened single-view datasets
-    train_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=True)
-    test_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_1/raw/expt_4/", is_train=False)
+    train_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_2/raw/expt_4/", is_train=True)
+    test_data = SingleViewCurriculumDataset("/content/drive/MyDrive/APLDL/new_data_2/raw/expt_4/", is_train=False)
 
     num_workers = 2 if torch.cuda.is_available() else 0
     pin_memory = True if torch.cuda.is_available() else False
