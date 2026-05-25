@@ -207,12 +207,13 @@ def main():
         # ==========================================
         model.train()
         train_loss = []
-        for img_batch in tqdm(train_loader, total=len(train_loader), desc="Stage 1 Training"):
+        for img_batch, bbox_batch in tqdm(train_loader, total=len(train_loader), desc="Stage 1 Training"):
             img_batch = img_batch.to(device)
+            bbox_batch = bbox_batch.to(device)
             optimizer.zero_grad()
 
             # Execute single view loss sequence at 75% standard masking ratio
-            loss = compute_stage1_loss(model, img_batch, mask_ratio=0.4)
+            loss = compute_stage1_loss(model, img_batch, bbox_batch, mask_ratio=0.4)
             loss.backward()
 
             # Enforce hard-stop value clipping to ground multimodal dynamics safely
@@ -229,9 +230,10 @@ def main():
         model.eval()
         with torch.no_grad():
             test_loss = []
-            for img_batch in tqdm(test_loader, total=len(test_loader), desc="Stage 1 Testing"):
+            for img_batch, bbox_batch in tqdm(test_loader, total=len(test_loader), desc="Stage 1 Testing"):
                 img_batch = img_batch.to(device)
-                loss = compute_stage1_loss(model, img_batch, mask_ratio=0.4)
+                bbox_batch = bbox_batch.to(device)
+                loss = compute_stage1_loss(model, img_batch, bbox_batch, mask_ratio=0.4)
                 test_loss.append(loss.item())
                 
         test_loss = np.array(test_loss).mean()
