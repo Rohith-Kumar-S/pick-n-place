@@ -281,7 +281,7 @@ def main():
                         'epoch' : epoch}, os.path.join(model_dir, str(epoch)+".ckpt"))
             print("Visualizing Reconstructions...")
             # We just pass the last batch from the test loader into the visualizer
-            visualize_croco_predictions(model, full_topdown, gripper_pov, top_mask_ratio = 0.95, grip_mask_ratio=0.40, num_samples=3, save_path=f"/content/epoch_{epoch}.png")
+            visualize_croco_predictions(model, full_topdown, gripper_pov, top_mask_ratio = 0.95, grip_mask_ratio=0.40, num_samples=3, save_path=os.path.join(results_dir, f"stage1_epoch_{epoch}.png"))
 
 
     # writer.close()
