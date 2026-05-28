@@ -227,8 +227,17 @@ def main():
 
     # Loop over epochs
     best_test_loss = np.inf
+    
+    # ==========================================
+    # EARLY STOPPING TRACKERS
+    # ==========================================
+    best_train_loss = np.inf
+    early_stop_patience = 4
+    train_patience_counter = 0
+
     for epoch in range(start_epoch, arglist.epochs):
         print("Epoch ", epoch + 1, "/", arglist.epochs)
+        
         # Training
         model.train()
         train_loss = []
@@ -236,27 +245,28 @@ def main():
             full_topdown = full_topdown.to(device)
             gripper_pov = gripper_pov.to(device)
             bboxes_tensor = bboxes_tensor.to(device)
-            # Inside your training loop:
+            
             optimizer.zero_grad()
 
-            # CORRECT
             loss = compute_croco_loss(model, full_topdown, gripper_pov, bboxes_tensor, top_mask_ratio=0.95, grip_mask_ratio=0.40)
 
-            # Backprop remains in fp32 for stability
             loss.backward()
-
-            # Safety hard-stop for multimodal gradients
             torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)
-
             optimizer.step()
-            
 
             train_loss.append(loss.item())
     
         train_loss = np.array(train_loss).mean()
 
-        
-        # writer.add_scalar('train_loss', train_loss, epoch)
+        # ==========================================
+        # TRAINING LOSS PATIENCE CHECK
+        # ==========================================
+        if train_loss < best_train_loss:
+            best_train_loss = train_loss
+            train_patience_counter = 0 # Reset patience if we hit a new best
+        else:
+            train_patience_counter += 1
+            print(f"-> Train loss plateau. Patience: {train_patience_counter}/{early_stop_patience}")
 
         # Testing
         with torch.no_grad():
@@ -265,17 +275,15 @@ def main():
                 full_topdown = full_topdown.to(device)
                 gripper_pov = gripper_pov.to(device)
                 bboxes_tensor = bboxes_tensor.to(device)
-                # CORRECT
+                
                 loss = compute_croco_loss(model, full_topdown, gripper_pov, bboxes_tensor, top_mask_ratio=0.95, grip_mask_ratio=0.40)
-
                 test_loss.append(loss.item())
                 
         test_loss = np.array(test_loss).mean()
         print("train loss: ", train_loss, "test loss: ", test_loss)
+        
         scheduler.step(test_loss)
         
-        
-        # writer.add_scalar('test_loss', test_loss, epoch)
         if test_loss < best_test_loss:
             torch.save({'model' : model.state_dict(),
                         'optimizer' : optimizer.state_dict(), 
@@ -287,9 +295,15 @@ def main():
                         'optimizer' : optimizer.state_dict(), 
                         'epoch' : epoch}, os.path.join(model_dir, str(epoch)+".ckpt"))
             print("Visualizing Reconstructions...")
-            # We just pass the last batch from the test loader into the visualizer
             visualize_croco_predictions(model, full_topdown, gripper_pov, top_mask_ratio = 0.95, grip_mask_ratio=0.40, num_samples=3, save_path=os.path.join(results_dir, f"stage2_epoch_{epoch}.png"))
 
+        # ==========================================
+        # EARLY STOPPING TRIGGER
+        # ==========================================
+        if train_patience_counter >= early_stop_patience:
+            print(f"\n[EARLY STOP] Training loss has not improved for {early_stop_patience} consecutive epochs.")
+            print("Halting training to save compute!")
+            break
 
     # writer.close()
 
