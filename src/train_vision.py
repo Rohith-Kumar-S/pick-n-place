@@ -140,62 +140,69 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     # writer = SummaryWriter(log_dir=results_dir)
 
-    # checkpoint_path = os.path.join(model_dir, arglist.ckpt)
-    # print(f"Loading model from {checkpoint_path}")
-    
-    # checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
     model = CroCoAutoencoder().to(device)
     
-    # =====================================================================
-    # CURRICULUM HANDOFF: STAGE 1 -> STAGE 2 WEIGHT TRANSFER
-    # =====================================================================
-    # Update this path to wherever your Stage 1 checkpoint is saved
-    stage1_ckpt_path = "/content/drive/MyDrive/APLDL/models/expt_5/stage1_best.ckpt" 
-    
-    if os.path.exists(stage1_ckpt_path):
-        print(f"\n[CURRICULUM] Loading Stage 1 Feature Extractors from {stage1_ckpt_path}")
-        checkpoint = torch.load(stage1_ckpt_path, map_location=device)
-        stage1_weights = checkpoint['model']
-        croco_state = model.state_dict()
+    checkpoint_path = os.path.join(model_dir, arglist.ckpt)
+
+    if os.path.exists(checkpoint_path):
+        # =====================================================================
+        # SCENARIO A: RESUMING STAGE 2 (Loading the Whole Model)
+        # =====================================================================
+        print(f"\n[RESUME] Found existing Stage 2 checkpoint at {checkpoint_path}")
+        checkpoint_whole = torch.load(checkpoint_path, map_location=device)
         
-        transfer_dict = {}
-        for key, weight in stage1_weights.items():
-            # 1. DROP THE DECODER
-            # Stage 1 decoder only knows Self-Attention. 
-            # CroCo must learn Cross-Attention from scratch.
-            if 'decoder' in key:
-                continue
-                
-            # 2. TRANSFER EVERYTHING ELSE (patch_embed, encoder, pos_embeds)
-            # Since the variable names match perfectly between Stage 1 and Stage 2,
-            # we just check if the shapes align and drop them in.
-            if key in croco_state and croco_state[key].shape == weight.shape:
-                transfer_dict[key] = weight
-                
-        # Inject the filtered Stage 1 weights into the CroCo state dictionary
-        croco_state.update(transfer_dict)
-        model.load_state_dict(croco_state) 
-        print(f"[CURRICULUM] Successfully injected {len(transfer_dict)} parameter tensors!\n")
+        # 1. Load the ENTIRE model (Encoder + trained Decoder)
+        model.load_state_dict(checkpoint_whole['model'])
+        
+        # 2. We STILL must freeze the encoder, otherwise PyTorch unfreezes it on load!
+        for name, param in model.named_parameters():
+            if 'patch_embed' in name or 'encoder' in name:
+                param.requires_grad = False
+        print("[RESUME] Stem and Encoder weights kept frozen.")
+        
+        # 3. Load optimizer state (Filtering for unfrozen params to save memory)
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=0.05)
+        optimizer.load_state_dict(checkpoint_whole['optimizer'])
+        
+        # 4. Resume epoch
+        start_epoch = checkpoint_whole['epoch'] + 1
+        print(f"[RESUME] Resuming training from Epoch {start_epoch}")
+
     else:
-        print(f"[WARNING] Stage 1 checkpoint not found at {stage1_ckpt_path}. Initializing CroCo from scratch.")
+        # =====================================================================
+        # SCENARIO B: CURRICULUM HANDOFF (Starting Stage 2 for the first time)
+        # =====================================================================
+        print(f"\n[START] No Stage 2 checkpoint found. Initializing Curriculum Handoff...")
+        stage1_ckpt_path = "/content/drive/MyDrive/APLDL/models/expt_5/stage1_best.ckpt" 
         
-    for name, param in model.named_parameters():
-        # Freeze the convolutional stem and the self-attention encoder
-        if 'patch_embed' in name or 'encoder' in name:
-            param.requires_grad = False
+        if os.path.exists(stage1_ckpt_path):
+            checkpoint = torch.load(stage1_ckpt_path, map_location=device)
+            stage1_weights = checkpoint['model']
+            croco_state = model.state_dict()
             
-    print("[CURRICULUM] Stem and Encoder weights frozen. Training Decoder only.")
-    # =====================================================================
-
-    # Initialize a fresh optimizer. 
-    # DO NOT load the Stage 1 optimizer state! CroCo needs fresh gradient momentum.
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
-    # optimizer.load_state_dict(checkpoint['optimizer'])
-
-    # Load epoch
-    # start_epoch = checkpoint['epoch']
-    start_epoch = 0
+            transfer_dict = {}
+            for key, weight in stage1_weights.items():
+                if 'decoder' in key:
+                    continue
+                if key in croco_state and croco_state[key].shape == weight.shape:
+                    transfer_dict[key] = weight
+                    
+            croco_state.update(transfer_dict)
+            model.load_state_dict(croco_state) 
+            print(f"[CURRICULUM] Successfully injected {len(transfer_dict)} parameter tensors!")
+        else:
+            print(f"[WARNING] Stage 1 checkpoint not found. Initializing CroCo entirely from scratch.")
+            
+        # Freeze weights
+        for name, param in model.named_parameters():
+            if 'patch_embed' in name or 'encoder' in name:
+                param.requires_grad = False
+        print("[CURRICULUM] Stem and Encoder weights frozen. Training Decoder only.")
+        
+        # Fresh Optimizer & Epoch
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=0.05)
+        start_epoch = 0
+    # start_epoch = 0
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
