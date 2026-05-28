@@ -232,7 +232,7 @@ def main():
             optimizer.zero_grad()
 
             # CORRECT
-            loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.75)
+            loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.95)
 
             # Backprop remains in fp32 for stability
             loss.backward()
@@ -258,7 +258,7 @@ def main():
                 gripper_pov = gripper_pov.to(device)
       
                 # CORRECT
-                loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.75)
+                loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.95)
                 test_loss.append(loss.item())
                 
         test_loss = np.array(test_loss).mean()
@@ -279,7 +279,7 @@ def main():
                         'epoch' : epoch}, os.path.join(model_dir, str(epoch)+".ckpt"))
             print("Visualizing Reconstructions...")
             # We just pass the last batch from the test loader into the visualizer
-            visualize_croco_predictions(model, full_topdown, gripper_pov, mask_ratio=0.75, num_samples=3, save_path=f"/content/epoch_{epoch}.png")
+            visualize_croco_predictions(model, full_topdown, gripper_pov, mask_ratio=0.95, num_samples=3, save_path=f"/content/epoch_{epoch}.png")
 
 
     # writer.close()
