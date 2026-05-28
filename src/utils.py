@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 from PIL import Image
-import mujoco
+# import mujoco
 import torch.nn.functional as F
 def construct_observation_tensor(o, env, env_top, arglist, stats, device, target=None):
     if arglist.image:

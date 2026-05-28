@@ -50,7 +50,7 @@ class CroCoPairDataset(Dataset):
 
         # Build flat index: list of (npz_path, frame_index_within_episode)
         self.samples: list[tuple[Path, int]] = []
-        npz_files = sorted(Path(data_root).glob("ep_*.npz"))
+        npz_files = sorted(Path(data_root).glob("Copy of ep_*.npz"))
         total_npz_files = len(npz_files)
         print(f"Loading {total_npz_files} NPZ files...")
         if self.is_train:
