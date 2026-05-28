@@ -301,7 +301,7 @@ class CroCoAutoencoder(nn.Module):
         
         self.reconstruction_head = nn.Linear(embed_dim, 3 * patch_size * patch_size)
 
-    def forward(self, topdown_img, gripper_img, mask_ratio=0.75, return_embedding_only=False):
+    def forward(self, topdown_img, gripper_img, top_mask_ratio=0.95, grip_mask_ratio=0.40, return_embedding_only=False):
         B = topdown_img.size(0)
         
         # --- 1. RAW FEATURE EXTRACTION ---
@@ -315,27 +315,40 @@ class CroCoAutoencoder(nn.Module):
         enc_top_tokens = top_tokens + self.pos_embed + self.topdown_view_embed
         enc_grip_tokens = grip_tokens + self.grip_pos_embed + self.gripper_view_embed
         
-        # --- 3. MASKING STRATEGY ---
-        num_masked = int(mask_ratio * self.num_patches)
-        noise = torch.rand(B, self.num_patches, device=top_tokens.device)
-        mask_indices = torch.argsort(noise, dim=1)[:, :num_masked]
-        visible_indices = torch.argsort(noise, dim=1)[:, num_masked:]
+        # ==========================================
+        # 3. DUAL MASKING STRATEGY
+        # ==========================================
+        # TOP-DOWN MASKING (95%)
+        num_masked_top = int(top_mask_ratio * self.num_patches)
+        noise_top = torch.rand(B, self.num_patches, device=top_tokens.device)
+        mask_indices_top = torch.argsort(noise_top, dim=1)[:, :num_masked_top]
+        visible_indices_top = torch.argsort(noise_top, dim=1)[:, num_masked_top:]
         
-        batch_indices = torch.arange(B).unsqueeze(1).expand(-1, self.num_patches - num_masked)
-        visible_top_tokens = enc_top_tokens[batch_indices, visible_indices]
+        batch_indices_top = torch.arange(B).unsqueeze(1).expand(-1, self.num_patches - num_masked_top)
+        visible_top_tokens = enc_top_tokens[batch_indices_top, visible_indices_top]
+
+        # GRIPPER MASKING (40%)
+        num_masked_grip = int(grip_mask_ratio * self.num_patches)
+        noise_grip = torch.rand(B, self.num_patches, device=grip_tokens.device)
+        # We only need the visible indices to pass to the encoder
+        visible_indices_grip = torch.argsort(noise_grip, dim=1)[:, num_masked_grip:]
+        
+        batch_indices_grip = torch.arange(B).unsqueeze(1).expand(-1, self.num_patches - num_masked_grip)
+        visible_grip_tokens = enc_grip_tokens[batch_indices_grip, visible_indices_grip]
         
         # --- 4. ENCODING ---
+        # Encoder now receives 5% of top-down tokens, and 60% of gripper tokens
         enc_top = self.encoder(visible_top_tokens)
-        enc_grip = self.encoder(enc_grip_tokens)
+        enc_grip = self.encoder(visible_grip_tokens)
         
-        # --- 5. DECODER PREP (Clean Assembly) ---
+        # --- 5. DECODER PREP (Target Assembly) ---
         full_top_tokens = self.mask_token.expand(B, self.num_patches, -1).clone()
-        full_top_tokens[batch_indices, visible_indices] = enc_top
-        
-        # Add spatial coordinates and view tags strictly ONCE to the complete sequence
+        full_top_tokens[batch_indices_top, visible_indices_top] = enc_top
         full_top_tokens = full_top_tokens + self.pos_embed + self.topdown_view_embed
         
         # --- 6. CROSS-VIEW COMPLETION ---
+        # The Decoder queries the 100% assembled top-down target 
+        # against the 60% encoded gripper memory. (Cross-attention natively handles differing sequence lengths!)
         fused_embeddings = self.decoder(tgt=full_top_tokens, memory=enc_grip)
         
         if return_embedding_only:
@@ -344,8 +357,9 @@ class CroCoAutoencoder(nn.Module):
         # --- 7. RECONSTRUCTION ---
         reconstructed_patches = self.reconstruction_head(fused_embeddings)
         
-        return reconstructed_patches, mask_indices
-
+        # We return the top-down mask indices so the loss function knows which patches to penalize
+        return reconstructed_patches, mask_indices_top
+    
 def patchify(imgs, patch_size=16):
     p = patch_size
     assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
@@ -363,8 +377,7 @@ def unpatchify(x, patch_size=16):
     x = torch.einsum('nhwpqc->nchpwq', x)
     x = x.reshape(shape=(B, 3, h * p, w * p))
     return x
-
-def compute_croco_loss(model, topdown_img, gripper_img, bbox, mask_ratio=0.75):
+def compute_croco_loss(model, topdown_img, gripper_img, bbox, top_mask_ratio=0.95, grip_mask_ratio=0.40):
     """
     Color-Heuristic Boosted L1 Loss. 
     Massively penalizes the network for failing to reconstruct multi-channel neon blocks.
@@ -374,7 +387,7 @@ def compute_croco_loss(model, topdown_img, gripper_img, bbox, mask_ratio=0.75):
     num_patches_1d = topdown_img.size(2) // P
     
     # 1. Forward Pass
-    preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
+    preds, mask_indices = model(topdown_img, gripper_img, top_mask_ratio=top_mask_ratio, grip_mask_ratio=grip_mask_ratio)
     target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=P)
     batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
     
@@ -420,13 +433,13 @@ def compute_croco_loss(model, topdown_img, gripper_img, bbox, mask_ratio=0.75):
     
     return boosted_loss.mean()
 
-def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75, num_samples=3, save_path=None):
+def visualize_croco_predictions(model, topdown_img, gripper_img, top_mask_ratio=0.95, grip_mask_ratio=0.40, num_samples=3, save_path=None):
     model.eval()
     B = topdown_img.size(0)
     num_samples = min(B, num_samples) 
     
     with torch.no_grad():
-        preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
+        preds, mask_indices = model(topdown_img, gripper_img, top_mask_ratio=top_mask_ratio, grip_mask_ratio=grip_mask_ratio)
         
     target_patches = patchify(topdown_img, patch_size=model.patch_size)
     masked_input_patches = target_patches.clone()
@@ -461,11 +474,12 @@ def visualize_croco_predictions(model, topdown_img, gripper_img, mask_ratio=0.75
         
     for i in range(num_samples):
         axes[i][0].imshow(np.transpose(gripper_vis[i], (1, 2, 0)))
-        axes[i][0].set_title("Gripper Context" if i==0 else "")
+        axes[i][0].set_title(f"Gripper Context ({int(grip_mask_ratio*100)}% Masked Internally)" if i==0 else "")
         axes[i][0].axis('off')
         
         axes[i][1].imshow(np.transpose(masked_vis[i], (1, 2, 0)))
-        axes[i][1].set_title(f"Masked Top-Down ({int(mask_ratio*100)}%)" if i==0 else "")
+        # FIX: Changed mask_ratio to top_mask_ratio here
+        axes[i][1].set_title(f"Masked Top-Down ({int(top_mask_ratio*100)}%)" if i==0 else "")
         axes[i][1].axis('off')
         
         axes[i][2].imshow(np.transpose(recon_vis[i], (1, 2, 0)))

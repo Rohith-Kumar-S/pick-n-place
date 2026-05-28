@@ -53,11 +53,11 @@ class CroCoPairDataset(Dataset):
         npz_files = sorted(Path(data_root).glob("Copy of ep_*.npz"))
         total_npz_files = len(npz_files)
         print(f"Loading {total_npz_files} NPZ files...")
-        if self.is_train:
-            npz_files = npz_files[:int(0.8 * total_npz_files)]
-            npz_files = np.random.permutation(npz_files)  # shuffle training files for better generalisation
-        else:
-            npz_files = npz_files[int(0.8 * total_npz_files):]
+        # if self.is_train:
+        #     npz_files = npz_files[:int(0.8 * total_npz_files)]
+        #     npz_files = np.random.permutation(npz_files)  # shuffle training files for better generalisation
+        # else:
+        #     npz_files = npz_files[int(0.8 * total_npz_files):]
         for npz in npz_files:
             n = np.load(npz, allow_pickle=True)['topdown'].shape[0]
             for i in range(n):
@@ -83,7 +83,8 @@ class CroCoPairDataset(Dataset):
         # Apply shared transform (resize + normalise)
         topdown_full_t  = self.transform(topdown_full)    # (3, 224, 224)
         gripper_full_t  = self.transform(gripper_full)    # (3, 224, 224)
-        bboxes = ep['bboxes'][frame_idx] 
+        bbox_key = 'bboxes_top' 
+        bboxes = ep[bbox_key][frame_idx]
         bboxes_tensor = torch.tensor(bboxes, dtype=torch.float32)
         
         return topdown_full_t, gripper_full_t, bboxes_tensor
@@ -201,8 +202,8 @@ def main():
         factor=0.5,
         patience=5
         )
-    train_data = CroCoPairDataset("/content/drive/MyDrive/APLDL/new_data/raw/expt_4/", is_train=True)
-    test_data = CroCoPairDataset("/content/drive/MyDrive/APLDL/new_data/raw/expt_4/", is_train=False)
+    train_data = CroCoPairDataset("/content/drive/MyDrive/APLDL/new_data_2/raw/expt_5/", is_train=True)
+    test_data = CroCoPairDataset("/content/drive/MyDrive/APLDL/new_data_2/raw/test/", is_train=False)
 
     if torch.cuda.is_available():
         num_workers=2
@@ -224,15 +225,15 @@ def main():
         # Training
         model.train()
         train_loss = []
-        for full_topdown, gripper_pov in tqdm(train_loader, total=len(train_loader), desc="Training"):
+        for full_topdown, gripper_pov, bboxes_tensor in tqdm(train_loader, total=len(train_loader), desc="Training"):
             full_topdown = full_topdown.to(device)
             gripper_pov = gripper_pov.to(device)
-
+            bboxes_tensor = bboxes_tensor.to(device)
             # Inside your training loop:
             optimizer.zero_grad()
 
             # CORRECT
-            loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.95)
+            loss = compute_croco_loss(model, full_topdown, gripper_pov, bboxes_tensor, top_mask_ratio=0.95, grip_mask_ratio=0.40)
 
             # Backprop remains in fp32 for stability
             loss.backward()
@@ -253,12 +254,13 @@ def main():
         # Testing
         with torch.no_grad():
             test_loss = []
-            for  full_topdown, gripper_pov in tqdm(test_loader, total=len(test_loader), desc="Testing"):
+            for  full_topdown, gripper_pov, bboxes_tensor in tqdm(test_loader, total=len(test_loader), desc="Testing"):
                 full_topdown = full_topdown.to(device)
                 gripper_pov = gripper_pov.to(device)
-      
+                bboxes_tensor = bboxes_tensor.to(device)
                 # CORRECT
-                loss = compute_croco_loss(model, full_topdown, gripper_pov, mask_ratio=0.95)
+                loss = compute_croco_loss(model, full_topdown, gripper_pov, bboxes_tensor, top_mask_ratio=0.95, grip_mask_ratio=0.40)
+
                 test_loss.append(loss.item())
                 
         test_loss = np.array(test_loss).mean()
@@ -279,7 +281,7 @@ def main():
                         'epoch' : epoch}, os.path.join(model_dir, str(epoch)+".ckpt"))
             print("Visualizing Reconstructions...")
             # We just pass the last batch from the test loader into the visualizer
-            visualize_croco_predictions(model, full_topdown, gripper_pov, mask_ratio=0.95, num_samples=3, save_path=f"/content/epoch_{epoch}.png")
+            visualize_croco_predictions(model, full_topdown, gripper_pov, top_mask_ratio = 0.95, grip_mask_ratio=0.40, num_samples=3, save_path=f"/content/epoch_{epoch}.png")
 
 
     # writer.close()
