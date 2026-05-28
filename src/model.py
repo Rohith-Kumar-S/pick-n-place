@@ -364,16 +364,18 @@ def unpatchify(x, patch_size=16):
     x = x.reshape(shape=(B, 3, h * p, w * p))
     return x
 
-def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
+def compute_croco_loss(model, topdown_img, gripper_img, bbox, mask_ratio=0.75):
     """
     Color-Heuristic Boosted L1 Loss. 
     Massively penalizes the network for failing to reconstruct multi-channel neon blocks.
     """
     B = topdown_img.size(0)
+    P = model.patch_size
+    num_patches_1d = topdown_img.size(2) // P
     
     # 1. Forward Pass
     preds, mask_indices = model(topdown_img, gripper_img, mask_ratio=mask_ratio)
-    target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=model.patch_size)
+    target_patches = model.patchify(topdown_img) if hasattr(model, 'patchify') else patchify(topdown_img, patch_size=P)
     batch_indices = torch.arange(B, device=topdown_img.device).unsqueeze(1).expand(-1, mask_indices.size(1))
     
     masked_targets = target_patches[batch_indices, mask_indices]
@@ -386,20 +388,35 @@ def compute_croco_loss(model, topdown_img, gripper_img, mask_ratio=0.75):
     # 2. Base L1 Error
     raw_patch_loss = torch.abs(masked_preds - masked_targets).mean(dim=-1) # [B, num_masked]
     
-    # ==========================================
-    # 3. COLOR-HEURISTIC BOOST 
-    # ==========================================
-    patch_size = model.patch_size
-    rgb_targets = masked_targets.view(B, -1, 3, patch_size, patch_size)
+    # Create a base weight matrix of 1.0 for the 2D patch grid: shape [B, grid_h, grid_w]
+    spatial_weights = torch.ones((B, num_patches_1d, num_patches_1d), device=topdown_img.device)
     
-    # Detect high-variance color channels (neon blocks vs solid bins)
-    channel_variance = rgb_targets.var(dim=2).mean(dim=(2, 3)) 
+    # Iterate over the batch to apply the 10x penalty to RoIs
+    for b in range(B):
+        for box in bbox[b]:
+            x1, y1, x2, y2 = box.int()
+            
+            # Skip padded/empty boxes
+            if x1 == 0 and x2 == 0 and y1 == 0 and y2 == 0:
+                continue
+            
+            # Convert pixel coords to patch grid indices (safely clamped to grid bounds)
+            px1 = torch.clamp(x1 // P, 0, num_patches_1d - 1)
+            px2 = torch.clamp(x2 // P, 0, num_patches_1d - 1)
+            py1 = torch.clamp(y1 // P, 0, num_patches_1d - 1)
+            py2 = torch.clamp(y2 // P, 0, num_patches_1d - 1)
+            
+            # Apply 10x penalty to the spatial regions containing the objects
+            spatial_weights[b, py1:py2+1, px1:px2+1] = 50.0
+            
+    # Flatten spatial weights to match the 1D patch sequence: [B, total_patches]
+    flat_weights = spatial_weights.view(B, -1)
     
-    # Multiplier scales up the loss for block regions (detached to keep gradients clean)
-    color_weight = (1.0 + (channel_variance * 10.0)).detach()
+    # Gather ONLY the weights for the patches that were actually masked out
+    masked_weights = flat_weights[batch_indices, mask_indices] # Shape: [B, num_masked]
     
-    # Apply the boost. No OHEM sorting here so the model learns macro-geometry at Epoch 0!
-    boosted_loss = raw_patch_loss * color_weight
+    # Apply the exact spatial boost
+    boosted_loss = raw_patch_loss * masked_weights
     
     return boosted_loss.mean()
 

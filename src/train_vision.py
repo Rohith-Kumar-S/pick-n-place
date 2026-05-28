@@ -33,7 +33,7 @@ class CroCoPairDataset(Dataset):
     def __init__(
         self,
         data_root: str,
-        patch_size: int = 16,
+        patch_size: int = 8,
         mask_ratio: float = 0.90,
         img_size: int = 224,
         use_saved_masks: bool = False,
@@ -58,7 +58,6 @@ class CroCoPairDataset(Dataset):
             npz_files = np.random.permutation(npz_files)  # shuffle training files for better generalisation
         else:
             npz_files = npz_files[int(0.8 * total_npz_files):]
-        npz_files = npz_files[:2]
         for npz in npz_files:
             n = np.load(npz, allow_pickle=True)['topdown'].shape[0]
             for i in range(n):
@@ -84,8 +83,10 @@ class CroCoPairDataset(Dataset):
         # Apply shared transform (resize + normalise)
         topdown_full_t  = self.transform(topdown_full)    # (3, 224, 224)
         gripper_full_t  = self.transform(gripper_full)    # (3, 224, 224)
+        bboxes = ep['bboxes'][frame_idx] 
+        bboxes_tensor = torch.tensor(bboxes, dtype=torch.float32)
         
-        return topdown_full_t, gripper_full_t
+        return topdown_full_t, gripper_full_t, bboxes_tensor
 
 
 def check(data_loader, model):
@@ -138,20 +139,56 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     # writer = SummaryWriter(log_dir=results_dir)
 
-    if arglist.evaluate_agent:
-        if arglist.image:
-            env = gym.make('Meta-World/MT1', env_name=arglist.env, seed=arglist.seed, render_mode="rgb_array",\
-                            camera_id=arglist.camera_id ,height=arglist.image_height,width=arglist.image_width)
-        else:
-            env = gym.make('Meta-World/MT1', env_name=arglist.env, seed=arglist.seed, render_mode='none')
-
     # checkpoint_path = os.path.join(model_dir, arglist.ckpt)
     # print(f"Loading model from {checkpoint_path}")
     
     # checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
     model = CroCoAutoencoder().to(device)
-    # model.load_state_dict(checkpoint['model'])
+    
+    # =====================================================================
+    # CURRICULUM HANDOFF: STAGE 1 -> STAGE 2 WEIGHT TRANSFER
+    # =====================================================================
+    # Update this path to wherever your Stage 1 checkpoint is saved
+    stage1_ckpt_path = "/content/drive/MyDrive/APLDL/models/expt_5/stage1_best.ckpt" 
+    
+    if os.path.exists(stage1_ckpt_path):
+        print(f"\n[CURRICULUM] Loading Stage 1 Feature Extractors from {stage1_ckpt_path}")
+        checkpoint = torch.load(stage1_ckpt_path, map_location=device)
+        stage1_weights = checkpoint['model']
+        croco_state = model.state_dict()
+        
+        transfer_dict = {}
+        for key, weight in stage1_weights.items():
+            # 1. DROP THE DECODER
+            # Stage 1 decoder only knows Self-Attention. 
+            # CroCo must learn Cross-Attention from scratch.
+            if 'decoder' in key:
+                continue
+                
+            # 2. TRANSFER EVERYTHING ELSE (patch_embed, encoder, pos_embeds)
+            # Since the variable names match perfectly between Stage 1 and Stage 2,
+            # we just check if the shapes align and drop them in.
+            if key in croco_state and croco_state[key].shape == weight.shape:
+                transfer_dict[key] = weight
+                
+        # Inject the filtered Stage 1 weights into the CroCo state dictionary
+        croco_state.update(transfer_dict)
+        model.load_state_dict(croco_state) 
+        print(f"[CURRICULUM] Successfully injected {len(transfer_dict)} parameter tensors!\n")
+    else:
+        print(f"[WARNING] Stage 1 checkpoint not found at {stage1_ckpt_path}. Initializing CroCo from scratch.")
+        
+    for name, param in model.named_parameters():
+        # Freeze the convolutional stem and the self-attention encoder
+        if 'patch_embed' in name or 'encoder' in name:
+            param.requires_grad = False
+            
+    print("[CURRICULUM] Stem and Encoder weights frozen. Training Decoder only.")
+    # =====================================================================
+
+    # Initialize a fresh optimizer. 
+    # DO NOT load the Stage 1 optimizer state! CroCo needs fresh gradient momentum.
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
     # optimizer.load_state_dict(checkpoint['optimizer'])
 
