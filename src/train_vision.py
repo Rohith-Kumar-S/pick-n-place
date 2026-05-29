@@ -161,7 +161,7 @@ def main():
         print("[RESUME] Stem and Encoder weights kept frozen.")
         
         # 3. Load optimizer state (Filtering for unfrozen params to save memory)
-        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=0.05)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
         optimizer.load_state_dict(checkpoint_whole['optimizer'])
         
         # 4. Resume epoch
