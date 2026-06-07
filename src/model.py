@@ -707,7 +707,7 @@ class Stage3VectorField(nn.Module):
         
         if arglist.image:
             # Assuming your CroCo embedding is 128D (change to 512 or 768 if different)
-            self.croco_encoder = nn.Linear(128, arglist.d_emb) 
+            self.croco_encoder = nn.Linear(512, arglist.d_emb)
             
         if arglist.text:
             # Simple, efficient categorical lookup table for the target (0, 1, or 2)
@@ -777,7 +777,7 @@ class FlowMatchingVLA(nn.Module):
         self.vector_field = Stage3VectorField(arglist)
         
         # Load pre-computed statistics for normalization
-        data_dir = os.path.join("/content/data/raw/", arglist.expt)
+        data_dir = os.path.join("/content/drive/MyDrive/APLDL/data/raw/")
         self.stats = np.load(os.path.join(data_dir, "stats.npz"), allow_pickle=True)
     
     def loss(self, O, A):
