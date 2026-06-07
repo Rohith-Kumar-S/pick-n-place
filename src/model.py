@@ -777,7 +777,7 @@ class FlowMatchingVLA(nn.Module):
         self.vector_field = Stage3VectorField(arglist)
         
         # Load pre-computed statistics for normalization
-        data_dir = os.path.join("/content/drive/MyDrive/APLDL/data/raw/")
+        data_dir = os.path.join("/content/drive/MyDrive/APLDL/data/raw/train")
         self.stats = np.load(os.path.join(data_dir, "stats.npz"), allow_pickle=True)
     
     def loss(self, O, A):

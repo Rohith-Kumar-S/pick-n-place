@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import sys
-from src.model import FlowMatchingModel # Ensure this imports your updated Stage3VectorField
+from src.model import FlowMatchingVLA # Ensure this imports your updated Stage3VectorField
 from src.utils import normalize, get_tensor
 from tqdm import tqdm
 
@@ -69,7 +69,8 @@ class Dataset(torch.utils.data.Dataset):
             o['croco_embedding'] = get_tensor(self.croco_embedding[n])
             
         if self.arglist.text:
-            o['text'] = get_tensor(self.text[n], dtype=torch.long)
+            # Bypass get_tensor to safely convert the scalar directly
+            o['text'] = torch.tensor(self.text[n], dtype=torch.long)
         
         return o, a
 
@@ -123,15 +124,15 @@ def main():
     writer = SummaryWriter(log_dir=results_dir)
 
     # Initialize updated Model
-    model = FlowMatchingModel(arglist).to(device)
+    model = FlowMatchingVLA(arglist).to(device)
 
     # Single unified optimizer (No CNN backbone to worry about)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     start_epoch = 0
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
-    )
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode='min', factor=0.5, patience=5
+    # )
     
     train_data = Dataset(arglist, "train")
     test_data = Dataset(arglist, "test")
@@ -201,7 +202,7 @@ def main():
         test_loss = np.mean(test_loss_tracker)
         print(f"Test Loss (MSE):  {test_loss:.6f}")
         
-        scheduler.step(test_loss)
+        # scheduler.step(test_loss)
         writer.add_scalar('test_loss', test_loss, epoch)
         writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
         
