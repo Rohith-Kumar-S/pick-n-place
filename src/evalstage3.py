@@ -26,8 +26,8 @@ def parse_args():
     parser.add_argument("--display", action="store_true", default=False)
     parser.add_argument("--image", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--camera-id", type=int, default=6, help="6: gripper pov")
-    parser.add_argument("--image-height", type=int, default=240, help="image height")
-    parser.add_argument("--image-width", type=int, default=240, help="image width")
+    parser.add_argument("--image-height", type=int, default=224, help="image height")
+    parser.add_argument("--image-width", type=int, default=224, help="image width")
     parser.add_argument("--text", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--num_objects", type=int, default=3, help="number of objects")
 
@@ -54,7 +54,7 @@ def eval_model(arglist):
     render_mode = "rgb_array"
     
     env = gym.make('Meta-World/MT1', env_name=arglist.env, seed=arglist.seed, 
-                   render_mode=render_mode, camera_id=arglist.camera_id,
+                   render_mode=render_mode, camera_name="behindGripper",
                    height=arglist.image_height, width=arglist.image_width)
                    
     env_top = gym.make('Meta-World/MT1', env_name=arglist.env, seed=arglist.seed,
