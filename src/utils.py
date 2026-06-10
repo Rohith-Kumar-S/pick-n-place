@@ -1,9 +1,15 @@
+""""
+Rohith Kumar Senthil Kumar
+Pick and Place Utility Functions
+"""
+
 import os
 import numpy as np
 import torch
 from PIL import Image
 # import mujoco
 import torch.nn.functional as F
+
 def construct_observation_tensor(o, env, env_top, arglist, stats, device, target=None):
     if arglist.image:
         # In proprio we store only end-effector position and gripper state

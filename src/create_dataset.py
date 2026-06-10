@@ -1,11 +1,14 @@
+""""
+Rohith Kumar Senthil Kumar
+Pick and Place Dataset Creation Script
+"""
+
 import os
 import argparse
 import numpy as np
 import gymnasium as gym
-import metaworld
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from src import model
 from src.utils import get_expert_policy, get_images, make_bbox_from_3d
 import mujoco
 
