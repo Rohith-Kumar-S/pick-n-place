@@ -7,6 +7,7 @@ import torchvision.transforms as T
 import gymnasium as gym
 import metaworld
 import imageio
+from PIL import Image, ImageDraw
 
 # Ensure these match the class names in your updated src/model.py
 from src.model import FlowMatchingVLA, CroCoAutoencoder 
@@ -106,12 +107,24 @@ def eval_model(arglist):
 
         while True:
             # 4a. Render Camera Feeds
-            gripper_img = env.render()
-            top_img = env_top.render()
+            # Using .copy() to prevent PyTorch negative stride errors
+            gripper_img = env.render().copy()
+            top_img = env_top.render().copy()
             
-            # Save side-by-side visualization for the GIF
+            # Combine images side-by-side
             combined_frame = np.concatenate([top_img, gripper_img], axis=1)
-            frames.append(combined_frame)
+            
+            # --- Draw the Overlay using PIL ---
+            pil_img = Image.fromarray(combined_frame)
+            draw = ImageDraw.Draw(pil_img)
+            
+            overlay_text = f"Stage 3 Inference | Target: {colors[target].upper()}"
+            
+            # Draw a black rectangle background for readability
+            draw.rectangle([(10, 10), (250, 30)], fill="black")
+            draw.text((15, 15), overlay_text, fill="white")
+            
+            frames.append(np.array(pil_img))
 
             # 4b. Live Feature Extraction
             with torch.no_grad():
